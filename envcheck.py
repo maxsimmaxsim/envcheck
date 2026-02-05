@@ -53,7 +53,10 @@ class Log:
 
     def write(self) -> None:
         try:
-            LOG_PATH.write_text("\n".join(self.lines) + ("\n" if self.lines else ""), encoding="utf-8")
+            LOG_PATH.write_text(
+                "\n".join(self.lines) + ("\n" if self.lines else ""),
+                encoding="utf-8",
+            )
         except Exception:
             pass
 
@@ -70,13 +73,32 @@ def success(log: Log) -> None:
     raise SystemExit(0)
 
 
+def unquote_if_wrapped(raw: str) -> tuple[str, bool]:
+    s = raw.strip()
+    if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+        return s[1:-1], True
+    return raw, False
+
+
 def is_command_input(raw: str) -> bool:
-    # If it contains whitespace and is not an existing path => treat as command
-    if any(ch.isspace() for ch in raw) and not Path(raw).exists():
+    raw = raw.strip()
+
+    unq, wrapped = unquote_if_wrapped(raw)
+    if wrapped:
+        try:
+            if Path(unq).exists():
+                return False
+        except Exception:
+            pass
         return True
-    # Quoted command also counts
-    if raw.startswith('"') or raw.startswith("'"):
-        return True
+
+    if any(ch.isspace() for ch in raw):
+        try:
+            if not Path(raw).exists():
+                return True
+        except Exception:
+            return True
+
     return False
 
 
@@ -94,21 +116,18 @@ def guess_runtime_from_command(cmd: List[str]) -> str:
 
 
 def find_entrypoint_in_dir(d: Path, log: Log) -> Optional[Path]:
-    # Priority list first
     for name in ENTRYPOINT_PATTERNS:
         candidate = d / name
         if candidate.exists() and candidate.is_file():
             log.add(f"entrypoint: {candidate.name}")
             return candidate
 
-    # Fallback: .sh, .js, .go only (NO .py fallback)
     for ext in (".sh", ".js", ".go"):
         matches = sorted(d.glob(f"*{ext}"))
         if matches:
             log.add(f"entrypoint: {matches[0].name}")
             return matches[0]
 
-    # No runnable entrypoint found
     log.add("entrypoint: none")
     return None
 
@@ -128,7 +147,6 @@ def guess_runtime_from_file(f: Path, log: Log) -> str:
     if ext == ".go":
         return "go"
 
-    # Shebang fallback for extensionless scripts
     try:
         first = f.open("r", encoding="utf-8", errors="ignore").readline().strip()
     except Exception:
@@ -161,28 +179,18 @@ def _dir_has_any_py(d: Path) -> bool:
 
 
 def classify_project_dir(d: Path, entrypoint: Optional[Path], log: Log) -> tuple[str, str]:
-    """
-    Returns (runtime, project_type) for directory targets.
-    Facts only; classification influences SUCCESS/FAIL semantics.
-    """
-    # If runnable entrypoint exists, runtime is derived from it and type is app
     if entrypoint:
         rt = guess_runtime_from_file(entrypoint, log)
         return rt, "app"
 
-    # No entrypoint: try identify library-like projects
-    # Node library marker
     if _dir_has(d, "package.json"):
         return "node", "library"
 
-    # Python library marker
     if _dir_has(d, "pyproject.toml") or _dir_has_any_py(d):
-        # If it has python files but no runnable entrypoint -> library-like (for our semantics)
         if _dir_has_any_py(d):
             log.add("python_dir: py_files_present")
         return "python", "library"
 
-    # Go library marker
     if _dir_has(d, "go.mod"):
         return "go", "library"
 
@@ -191,6 +199,15 @@ def classify_project_dir(d: Path, entrypoint: Optional[Path], log: Log) -> tuple
 
 def parse_target(raw: str, log: Log) -> Target:
     raw = raw.strip()
+
+    unq, wrapped = unquote_if_wrapped(raw)
+    if wrapped:
+        try:
+            if Path(unq).exists():
+                raw = unq
+        except Exception:
+            pass
+
     if is_command_input(raw):
         try:
             cmd = shlex.split(raw)
@@ -201,7 +218,12 @@ def parse_target(raw: str, log: Log) -> Target:
             log.add("command: empty")
             return Target(kind="command", command=None, runtime="unknown")
         log.add(f"input: command={' '.join(cmd[:6])}{' ...' if len(cmd) > 6 else ''}")
-        return Target(kind="command", command=cmd, runtime=guess_runtime_from_command(cmd), project_type="app")
+        return Target(
+            kind="command",
+            command=cmd,
+            runtime=guess_runtime_from_command(cmd),
+            project_type="app",
+        )
 
     p = Path(raw)
     if p.is_file():
@@ -233,7 +255,12 @@ def which_runtime(runtime: str) -> Optional[str]:
 
 def get_runtime_version(exe: str, runtime: str, log: Log) -> None:
     try:
-        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=2)
+        proc = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
         out = (proc.stdout or proc.stderr).strip()
         if out:
             log.add(f"runtime_version: {out.splitlines()[0][:120]}")
@@ -255,7 +282,6 @@ def detect_project_facts(t: Target, log: Log) -> None:
     def present(p: Path) -> str:
         return "present" if p.exists() else "absent"
 
-    # One line that matters for the new semantics (library vs app)
     if t.project_type != "unknown":
         log.add(f"project_type: {t.project_type}")
 
@@ -280,13 +306,11 @@ def detect_project_facts(t: Target, log: Log) -> None:
         log.add(f"pyproject: {present(pyproject)}")
         log.add(f"requirements_txt: {present(requirements)}")
         log.add(f"venv: {'present' if venv_present else 'absent'}")
-
     elif rt == "node":
         log.add(f"package_json: {present(package_json)}")
         any_lock = package_lock.exists() or yarn_lock.exists() or pnpm_lock.exists()
         log.add(f"lockfile: {'present' if any_lock else 'absent'}")
         log.add(f"node_modules: {present(node_modules)}")
-
     elif rt == "go":
         log.add(f"go_mod: {present(go_mod)}")
 
@@ -340,6 +364,7 @@ def python_deps_probe_from_requirements(t: Target, log: Log, max_pkgs: int = 12)
     checked = 0
     try:
         import importlib.util
+
         for p in pkgs:
             checked += 1
             mod_guess = p.replace("-", "_")
@@ -378,7 +403,6 @@ def build_run_command(t: Target, runtime_exe: Optional[str], log: Log) -> Option
         return t.command
 
     if not t.entrypoint:
-        # If it's a library, run is not applicable (and will be SUCCESS in main)
         log.add("run: not_applicable")
         return None
 
@@ -388,18 +412,8 @@ def build_run_command(t: Target, runtime_exe: Optional[str], log: Log) -> Option
     ep = t.entrypoint
     assert ep is not None
 
-    rt = (t.runtime or "unknown")
-    if rt == "python":
-        if not runtime_exe:
-            log.add("runtime: missing")
-            return None
-        return [runtime_exe, str(ep)]
-    if rt == "node":
-        if not runtime_exe:
-            log.add("runtime: missing")
-            return None
-        return [runtime_exe, str(ep)]
-    if rt == "bash":
+    rt = t.runtime or "unknown"
+    if rt in ("python", "node", "bash"):
         if not runtime_exe:
             log.add("runtime: missing")
             return None
@@ -470,8 +484,6 @@ def main() -> None:
         log.add("runtime: unknown")
         fail(log)
 
-    # For library projects, runtime presence is still a check (node/python/go should exist),
-    # but run is not attempted.
     runtime_exe = which_runtime(rt)
     if not runtime_exe:
         log.add("runtime: missing")
@@ -482,11 +494,9 @@ def main() -> None:
     detect_project_facts(t, log)
     python_deps_probe_from_requirements(t, log)
 
-    # Library semantics: SUCCESS (run not applicable)
     if t.project_type == "library":
         success(log)
 
-    # Command mode
     if t.kind == "command":
         cmd = build_run_command(t, None, log)
         if not cmd:
