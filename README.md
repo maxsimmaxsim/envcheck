@@ -27,8 +27,9 @@
 
 ## Result semantics
 
-- `SUCCESS` means the target started successfully  
-  or the run was not applicable (for example, library projects)
+- SUCCESS means the target started successfully,
+or is still running after a short start window,
+or the run was not applicable (for example, library projects)
 - `FAIL` means the target could not be started  
   in the current environment
 
